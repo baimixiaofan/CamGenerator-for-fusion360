@@ -233,7 +233,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             # === 模式选择 ===
             modeInput = inputs.addDropDownCommandInput(
                 'mode', '生成模式',
-                adsk.core.DropDownStyles.TextDropDownStyle
+                adsk.core.DropDownStyles.TextListDropDownStyle
             )
             modeItems = modeInput.listItems
             modeItems.add('参数化运动规律', True)
@@ -247,7 +247,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             # 运动规律类型
             lawInput = paramInputs.addDropDownCommandInput(
                 'motionLaw', '运动规律',
-                adsk.core.DropDownStyles.TextDropDownStyle
+                adsk.core.DropDownStyles.TextListDropDownStyle
             )
             lawItems = lawInput.listItems
             lawItems.add('简谐运动', True)
@@ -264,7 +264,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'maxLift', '最大升程', 'mm',
                 0.5, 200.0, 0.5, 20.0
             )
-            # 近休止角
+            # 近休止角（unit='deg' 时参数和返回值都是度数）
             paramInputs.addFloatSpinnerCommandInput(
                 'innerDwellAngle', '近休止角', 'deg',
                 0.0, 180.0, 1.0, 30.0
@@ -282,7 +282,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             # 回程角
             paramInputs.addFloatSpinnerCommandInput(
                 'returnAngle', '回程角', 'deg',
-                10.0, 350.0, 1.0, 120.0
+                10.0, 350.0, 1.0, 150.0
             )
 
             # === 导入模式组 ===
@@ -378,10 +378,11 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 
                 baseRadius = paramInputs.itemById('baseRadius').value
                 maxLift = paramInputs.itemById('maxLift').value
-                innerDwell = paramInputs.itemById('innerDwellAngle').value
-                riseAngle = paramInputs.itemById('riseAngle').value
-                outerDwell = paramInputs.itemById('outerDwellAngle').value
-                returnAngle = paramInputs.itemById('returnAngle').value
+                # .value 返回弧度，转换为度
+                innerDwell = math.degrees(paramInputs.itemById('innerDwellAngle').value)
+                riseAngle = math.degrees(paramInputs.itemById('riseAngle').value)
+                outerDwell = math.degrees(paramInputs.itemById('outerDwellAngle').value)
+                returnAngle = math.degrees(paramInputs.itemById('returnAngle').value)
 
                 # 生成轮廓点
                 profile_points = generate_cam_profile_points(
