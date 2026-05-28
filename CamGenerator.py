@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 CamGenerator - Fusion 360 盘形凸轮自动创建插件
-支持参数化运动规律生成和导入轮廓点数据两种模式
+支持多段式参数化运动规律生成和导入轮廓点数据两种模式
 """
 
 import adsk.core
@@ -15,55 +15,40 @@ _app = None
 _ui = None
 _handlers = []
 
-# 命令 ID
 CMD_ID = 'CamGeneratorCmd'
 CMD_NAME = '凸轮生成器'
-CMD_TOOLTIP = '自动创建盘形凸轮，支持参数化运动规律和导入轮廓点数据'
+CMD_TOOLTIP = '自动创建盘形凸轮，支持多段式参数化运动规律和导入轮廓点数据'
+
+MAX_SEGMENTS = 10
 
 
 # ============================================================
 # 运动规律数学函数
 # ============================================================
 
-def simple_harmonic_rise(theta, beta, h, rb):
-    """简谐运动升程: r = rb + h/2 * (1 - cos(pi*theta/beta))"""
-    return rb + h / 2.0 * (1.0 - math.cos(math.pi * theta / beta))
+def simple_harmonic_rise(theta, beta, h):
+    return h / 2.0 * (1.0 - math.cos(math.pi * theta / beta))
 
+def simple_harmonic_return(theta, beta, h):
+    return h / 2.0 * (1.0 + math.cos(math.pi * theta / beta))
 
-def simple_harmonic_return(theta, beta, h, rb):
-    """简谐运动回程: r = rb + h/2 * (1 + cos(pi*theta/beta))"""
-    return rb + h / 2.0 * (1.0 + math.cos(math.pi * theta / beta))
+def constant_velocity_rise(theta, beta, h):
+    return h * theta / beta
 
+def constant_velocity_return(theta, beta, h):
+    return h * (1.0 - theta / beta)
 
-def constant_velocity_rise(theta, beta, h, rb):
-    """等速运动升程: r = rb + h*theta/beta"""
-    return rb + h * theta / beta
-
-
-def constant_velocity_return(theta, beta, h, rb):
-    """等速运动回程: r = rb + h*(1 - theta/beta)"""
-    return rb + h * (1.0 - theta / beta)
-
-
-def modified_trapezoid_rise(theta, beta, h, rb):
-    """改进梯形运动升程（分段加速度曲线）"""
-    # 改进梯形：加速段(0~beta/4) - 等速段(beta/4~3*beta/4) - 减速段(3*beta/4~beta)
-    # 使用正弦加速度过渡
+def modified_trapezoid_rise(theta, beta, h):
     b = beta
     if theta <= b / 4.0:
-        # 加速段
         s = h * (2.0 * theta / b - math.sin(4.0 * math.pi * theta / b) / (2.0 * math.pi))
     elif theta <= 3.0 * b / 4.0:
-        # 等速段
         s = h * (4.0 * theta / b - 1.0) / 2.0
     else:
-        # 减速段
         s = h * (1.0 - 2.0 * (b - theta) / b + math.sin(4.0 * math.pi * (b - theta) / b) / (2.0 * math.pi))
-    return rb + s
+    return s
 
-
-def modified_trapezoid_return(theta, beta, h, rb):
-    """改进梯形运动回程"""
+def modified_trapezoid_return(theta, beta, h):
     b = beta
     if theta <= b / 4.0:
         s = h * (1.0 - 2.0 * theta / b + math.sin(4.0 * math.pi * theta / b) / (2.0 * math.pi))
@@ -71,65 +56,79 @@ def modified_trapezoid_return(theta, beta, h, rb):
         s = h * (1.0 - (4.0 * theta / b - 1.0) / 2.0)
     else:
         s = h * (2.0 * (b - theta) / b - math.sin(4.0 * math.pi * (b - theta) / b) / (2.0 * math.pi))
-    return rb + s
+    return s
 
 
-def generate_cam_profile_points(baseRadius, maxLift, innerDwell, riseAngle,
-                                  outerDwell, returnAngle, motionLaw, numPoints=360):
+def get_motion_func(motionLaw, segType):
+    """根据运动规律和段类型返回对应的函数"""
+    if segType == 'rise':
+        if motionLaw == 'constant_velocity':
+            return constant_velocity_rise
+        elif motionLaw == 'modified_trapezoid':
+            return modified_trapezoid_rise
+        return simple_harmonic_rise
+    else:  # return
+        if motionLaw == 'constant_velocity':
+            return constant_velocity_return
+        elif motionLaw == 'modified_trapezoid':
+            return modified_trapezoid_return
+        return simple_harmonic_return
+
+
+# ============================================================
+# 多段式轮廓生成
+# ============================================================
+
+def generate_multi_segment_profile(baseRadius, segments, motionLaw, numPoints=360):
     """
-    生成凸轮轮廓点（极坐标形式）
+    多段式凸轮轮廓生成
+    segments: [(segType, angle, lift), ...]  segType='dwell'|'rise'|'return'
     返回 [(angle_deg, radius), ...]
     """
-    totalAngle = innerDwell + riseAngle + outerDwell + returnAngle
+    totalAngle = sum(seg[1] for seg in segments)
     if abs(totalAngle - 360.0) > 0.01:
+        segDesc = ' + '.join(f'{seg[1]}°' for seg in segments)
         raise ValueError(
-            f'角度之和必须等于360°，当前为{totalAngle}°\n'
-            f'近休止{innerDwell}° + 升程{riseAngle}° + 远休止{outerDwell}° + 回程{returnAngle}°'
+            f'所有段角度之和必须等于360°，当前为{totalAngle}°\n({segDesc})'
         )
 
     rb = baseRadius
-    h = maxLift
-
-    # 选择运动规律函数
-    if motionLaw == 'simple_harmonic':
-        rise_func = simple_harmonic_rise
-        return_func = simple_harmonic_return
-    elif motionLaw == 'constant_velocity':
-        rise_func = constant_velocity_rise
-        return_func = constant_velocity_return
-    elif motionLaw == 'modified_trapezoid':
-        rise_func = modified_trapezoid_rise
-        return_func = modified_trapezoid_return
-    else:
-        rise_func = simple_harmonic_rise
-        return_func = simple_harmonic_return
-
+    currentR = rb
     points = []
-    for i in range(numPoints):
-        angle = 360.0 * i / numPoints  # 角度（度）
+    numActive = sum(1 for seg in segments if seg[1] > 0.001)
+    ptsPerSeg = max(20, numPoints // numActive) if numActive > 0 else numPoints
+    angleAccum = 0.0
 
-        if angle < innerDwell:
-            # 近休止段
-            r = rb
-        elif angle < innerDwell + riseAngle:
-            # 升程段
-            theta = angle - innerDwell
-            r = rise_func(theta, riseAngle, h, rb)
-        elif angle < innerDwell + riseAngle + outerDwell:
-            # 远休止段
-            r = rb + h
+    for segType, segAngle, segLift in segments:
+        if segAngle < 0.001:
+            continue
+
+        nPts = max(20, int(ptsPerSeg * segAngle / 360.0))
+
+        if segType == 'dwell':
+            for i in range(nPts):
+                theta = segAngle * i / nPts
+                points.append((angleAccum + theta, currentR))
         else:
-            # 回程段
-            theta = angle - innerDwell - riseAngle - outerDwell
-            r = return_func(theta, returnAngle, h, rb)
+            func = get_motion_func(motionLaw, segType)
+            startR = currentR
+            for i in range(nPts):
+                theta = segAngle * i / nPts
+                delta = func(theta, segAngle, segLift)
+                r = startR + delta if segType == 'rise' else startR - delta
+                points.append((angleAccum + theta, r))
+            currentR = currentR + segLift if segType == 'rise' else currentR - segLift
 
-        points.append((angle, r))
+        angleAccum += segAngle
 
     return points
 
 
+# ============================================================
+# CSV 导入
+# ============================================================
+
 def load_points_from_csv(filepath):
-    """从 CSV 文件加载凸轮轮廓点 [(angle_deg, radius), ...]"""
     points = []
     with open(filepath, 'r', encoding='utf-8-sig') as f:
         reader = csv.reader(f)
@@ -142,11 +141,8 @@ def load_points_from_csv(filepath):
                 points.append((angle, radius))
             except ValueError:
                 continue
-
     if len(points) < 3:
         raise ValueError('CSV 文件至少需要 3 个有效数据点')
-
-    # 按角度排序
     points.sort(key=lambda p: p[0])
     return points
 
@@ -156,15 +152,9 @@ def load_points_from_csv(filepath):
 # ============================================================
 
 def create_cam_body(rootComp, profile_points, thickness, shaftHoleDia):
-    """
-    根据凸轮轮廓点创建 3D 实体
-    profile_points: [(angle_deg, radius), ...]
-    """
-    # 在 XY 平面创建草图
     sketch = rootComp.sketches.add(rootComp.xYConstructionPlane)
     sketch.name = 'CamProfile'
 
-    # 将极坐标点转为笛卡尔坐标
     splinePoints = adsk.core.ObjectCollection.create()
     for angle_deg, radius in profile_points:
         angle_rad = math.radians(angle_deg)
@@ -172,33 +162,25 @@ def create_cam_body(rootComp, profile_points, thickness, shaftHoleDia):
         y = radius * math.sin(angle_rad)
         splinePoints.add(adsk.core.Point3D.create(x, y, 0))
 
-    # 添加第一个点以闭合轮廓
+    # 闭合轮廓
     first_angle_rad = math.radians(profile_points[0][0])
     first_r = profile_points[0][1]
     splinePoints.add(adsk.core.Point3D.create(
         first_r * math.cos(first_angle_rad),
-        first_r * math.sin(first_angle_rad),
-        0
+        first_r * math.sin(first_angle_rad), 0
     ))
 
-    # 创建样条曲线
-    spline = sketch.sketchCurves.sketchFittedSplines.add(splinePoints)
+    sketch.sketchCurves.sketchFittedSplines.add(splinePoints)
 
-    # 创建轴孔圆（如果需要）
     if shaftHoleDia > 0:
         center = adsk.core.Point3D.create(0, 0, 0)
-        sketch.sketchCurves.sketchCircles.addByCenterRadius(
-            center, shaftHoleDia / 2.0
-        )
+        sketch.sketchCurves.sketchCircles.addByCenterRadius(center, shaftHoleDia / 2.0)
 
-    # 获取轮廓
     profiles = sketch.profiles
     if profiles.count == 0:
         raise RuntimeError('无法创建有效的草图轮廓，请检查参数')
 
     profile = profiles.item(0)
-
-    # 拉伸
     extrudes = rootComp.features.extrudeFeatures
     extInput = extrudes.createInput(
         profile, adsk.fusion.FeatureOperations.NewBodyFeatureOperation
@@ -206,15 +188,36 @@ def create_cam_body(rootComp, profile_points, thickness, shaftHoleDia):
     distance = adsk.core.ValueInput.createByReal(thickness)
     extInput.setDistanceExtent(False, distance)
     extrude = extrudes.add(extInput)
-
     return extrude.bodies.item(0)
 
 
 def export_step(design, body, filepath):
-    """导出实体为 STEP 文件"""
     exportMgr = design.exportManager
     stepOptions = exportMgr.createSTEPExportOptions(filepath, body)
     exportMgr.execute(stepOptions)
+
+
+# ============================================================
+# UI 辅助
+# ============================================================
+
+def update_segment_visibility(paramInputs, count):
+    """显示/隐藏段输入控件"""
+    for i in range(MAX_SEGMENTS):
+        visible = i < count
+        for suffix in ['Type', 'Angle', 'Lift']:
+            inp = paramInputs.itemById(f'seg{i}{suffix}')
+            if inp:
+                inp.isVisible = visible
+
+def update_lift_visibility(paramInputs, count):
+    """根据段类型显示/隐藏升程输入"""
+    for i in range(count):
+        typeInput = paramInputs.itemById(f'seg{i}Type')
+        liftInput = paramInputs.itemById(f'seg{i}Lift')
+        if typeInput and liftInput:
+            typeName = typeInput.selectedItem.name if typeInput.selectedItem else ''
+            liftInput.isVisible = (typeName != '停')
 
 
 # ============================================================
@@ -222,8 +225,6 @@ def export_step(design, body, filepath):
 # ============================================================
 
 class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
-    """命令创建时设置 UI 控件"""
-
     def notify(self, args):
         try:
             cmd = args.command
@@ -257,45 +258,65 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             # 基圆半径
             paramInputs.addFloatSpinnerCommandInput(
                 'baseRadius', '基圆半径', 'mm',
-                5.0, 500.0, 0.5, 30.0
+                1.0, 100.0, 0.5, 5.5
             )
-            # 最大升程
-            paramInputs.addFloatSpinnerCommandInput(
-                'maxLift', '最大升程', 'mm',
-                0.5, 200.0, 0.5, 20.0
+
+            # 段数
+            paramInputs.addIntegerSpinnerCommandInput(
+                'segCount', '运动段数', 1, MAX_SEGMENTS, 1, 2
             )
-            # 近休止角（unit='deg' 时参数和返回值都是度数）
-            paramInputs.addFloatSpinnerCommandInput(
-                'innerDwellAngle', '近休止角', 'deg',
-                0.0, 180.0, 1.0, 30.0
-            )
-            # 升程角
-            paramInputs.addFloatSpinnerCommandInput(
-                'riseAngle', '升程角', 'deg',
-                10.0, 350.0, 1.0, 120.0
-            )
-            # 远休止角
-            paramInputs.addFloatSpinnerCommandInput(
-                'outerDwellAngle', '远休止角', 'deg',
-                0.0, 180.0, 1.0, 60.0
-            )
-            # 回程角
-            paramInputs.addFloatSpinnerCommandInput(
-                'returnAngle', '回程角', 'deg',
-                10.0, 350.0, 1.0, 150.0
-            )
+
+            # 预创建所有段输入（最多 MAX_SEGMENTS 段）
+            for i in range(MAX_SEGMENTS):
+                # 默认 2 段: 第0段=升(180°,6mm), 第1段=回(180°,6mm)
+                defaultType = '停'
+                defaultAngle = 90.0
+                defaultLift = 0.0
+                if i == 0:
+                    defaultType = '升'
+                    defaultAngle = 180.0
+                    defaultLift = 6.0
+                elif i == 1:
+                    defaultType = '回'
+                    defaultAngle = 180.0
+                    defaultLift = 6.0
+
+                # 段类型
+                typeInput = paramInputs.addDropDownCommandInput(
+                    f'seg{i}Type', f'段{i+1} 类型',
+                    adsk.core.DropDownStyles.TextListDropDownStyle
+                )
+                typeItems = typeInput.listItems
+                typeItems.add('停', defaultType == '停')
+                typeItems.add('升', defaultType == '升')
+                typeItems.add('回', defaultType == '回')
+
+                # 段角度
+                paramInputs.addFloatSpinnerCommandInput(
+                    f'seg{i}Angle', f'段{i+1} 角度', 'deg',
+                    1.0, 360.0, 1.0, defaultAngle
+                )
+
+                # 段升程（仅升/回段显示）
+                liftInput = paramInputs.addFloatSpinnerCommandInput(
+                    f'seg{i}Lift', f'段{i+1} 升程', 'mm',
+                    0.1, 100.0, 0.5, defaultLift
+                )
+                liftInput.isVisible = (defaultType != '停')
+
+                # 隐藏超出默认段数的控件
+                if i >= 2:
+                    for inp in [typeInput, liftInput]:
+                        inp.isVisible = False
+                    paramInputs.itemById(f'seg{i}Angle').isVisible = False
 
             # === 导入模式组 ===
             importGroup = inputs.addGroupCommandInput('importGroup', '导入轮廓数据')
             importGroup.isVisible = False
             importInputs = importGroup.children
+            importInputs.addStringValueInput('filePath', 'CSV 文件路径', '')
 
-            # 文件路径
-            importInputs.addStringValueInput(
-                'filePath', 'CSV 文件路径', ''
-            )
-
-            # === 通用参数（放在组外）===
+            # === 通用参数 ===
             inputs.addFloatSpinnerCommandInput(
                 'thickness', '凸轮厚度', 'mm',
                 1.0, 500.0, 0.5, 10.0
@@ -319,34 +340,39 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
 
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
-    """处理输入变化，切换模式时显示/隐藏控件组"""
-
     def notify(self, args):
         try:
-            inputs = args.command.commandInputs
+            inputs = args.inputs
             changedInput = args.input
 
             if changedInput.id == 'mode':
                 modeIndex = changedInput.selectedItem.index
                 paramGroup = inputs.itemById('paramGroup')
                 importGroup = inputs.itemById('importGroup')
-
                 if modeIndex == 0:
-                    # 参数化模式
                     paramGroup.isVisible = True
                     importGroup.isVisible = False
                 else:
-                    # 导入模式
                     paramGroup.isVisible = False
                     importGroup.isVisible = True
+
+            elif changedInput.id == 'segCount':
+                count = changedInput.value
+                update_segment_visibility(inputs, count)
+                update_lift_visibility(inputs, count)
+
+            elif changedInput.id.startswith('seg') and changedInput.id.endswith('Type'):
+                idx = int(changedInput.id[3:-4])
+                typeName = changedInput.selectedItem.name
+                liftInput = inputs.itemById(f'seg{idx}Lift')
+                if liftInput:
+                    liftInput.isVisible = (typeName != '停')
 
         except:
             _ui.messageBox('InputChanged 错误:\n{}'.format(traceback.format_exc()))
 
 
 class ExecuteHandler(adsk.core.CommandEventHandler):
-    """执行凸轮创建"""
-
     def notify(self, args):
         try:
             app = adsk.core.Application.get()
@@ -361,65 +387,65 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             shaftHoleDia = inputs.itemById('shaftHoleDia').value
 
             if modeIndex == 0:
-                # === 参数化模式 ===
+                # === 参数化多段模式 ===
                 paramGroup = inputs.itemById('paramGroup')
                 paramInputs = paramGroup.children
 
                 motionLawItem = paramInputs.itemById('motionLaw').selectedItem
-                motionLaw = motionLawItem.name  # '简谐运动' / '等速运动' / '改进梯形'
-
-                # 映射运动规律名称到内部标识
+                motionLawName = motionLawItem.name
                 lawMap = {
                     '简谐运动': 'simple_harmonic',
                     '等速运动': 'constant_velocity',
                     '改进梯形': 'modified_trapezoid'
                 }
-                lawKey = lawMap.get(motionLaw, 'simple_harmonic')
+                motionLaw = lawMap.get(motionLawName, 'simple_harmonic')
 
                 baseRadius = paramInputs.itemById('baseRadius').value
-                maxLift = paramInputs.itemById('maxLift').value
-                # .value 返回弧度，转换为度
-                innerDwell = math.degrees(paramInputs.itemById('innerDwellAngle').value)
-                riseAngle = math.degrees(paramInputs.itemById('riseAngle').value)
-                outerDwell = math.degrees(paramInputs.itemById('outerDwellAngle').value)
-                returnAngle = math.degrees(paramInputs.itemById('returnAngle').value)
+                segCount = paramInputs.itemById('segCount').value
 
-                # 生成轮廓点
-                profile_points = generate_cam_profile_points(
-                    baseRadius, maxLift, innerDwell, riseAngle,
-                    outerDwell, returnAngle, lawKey, numPoints=360
+                segments = []
+                for i in range(segCount):
+                    typeName = paramInputs.itemById(f'seg{i}Type').selectedItem.name
+                    segTypeMap = {'停': 'dwell', '升': 'rise', '回': 'return'}
+                    segType = segTypeMap.get(typeName, 'dwell')
+
+                    segAngle = math.degrees(paramInputs.itemById(f'seg{i}Angle').value)
+
+                    if segType == 'dwell':
+                        segLift = 0.0
+                    else:
+                        segLift = paramInputs.itemById(f'seg{i}Lift').value
+
+                    segments.append((segType, segAngle, segLift))
+
+                profile_points = generate_multi_segment_profile(
+                    baseRadius, segments, motionLaw, numPoints=360
                 )
             else:
                 # === 导入模式 ===
                 importGroup = inputs.itemById('importGroup')
                 importInputs = importGroup.children
-
                 filePath = importInputs.itemById('filePath').value
                 if not filePath or not os.path.isfile(filePath):
                     _ui.messageBox('请输入有效的 CSV 文件路径')
                     args.isValidResult = False
                     return
-
                 profile_points = load_points_from_csv(filePath)
 
-            # 创建凸轮实体
             body = create_cam_body(rootComp, profile_points, thickness, shaftHoleDia)
 
-            # 询问是否导出 STEP
             result = _ui.messageBox(
                 '凸轮创建成功！\n\n是否导出为 STEP 文件？',
                 '导出 STEP',
                 adsk.core.MessageBoxButtonTypes.YesNoButtonType,
                 adsk.core.MessageBoxIconTypes.QuestionIconType
             )
-
             if result == adsk.core.DialogResults.DialogYes:
                 fileDialog = _ui.createFileDialog()
                 fileDialog.title = '保存 STEP 文件'
                 fileDialog.filter = 'STEP 文件 (*.step;*.stp)'
                 fileDialog.filterIndex = 0
                 fileDialog.isMultiSelectEnabled = False
-
                 dialogResult = fileDialog.showSave()
                 if dialogResult == adsk.core.DialogResults.DialogOK:
                     stepPath = fileDialog.filename
@@ -446,22 +472,17 @@ def run(context):
         _app = adsk.core.Application.get()
         _ui = _app.userInterface
 
-        # 检查命令是否已存在
         existingCmd = _ui.commandDefinitions.itemById(CMD_ID)
         if existingCmd:
             existingCmd.deleteMe()
 
-        # 创建命令定义
         cmdDef = _ui.commandDefinitions.addButtonDefinition(
             CMD_ID, CMD_NAME, CMD_TOOLTIP
         )
-
-        # 注册命令创建事件
         onCreated = CommandCreatedHandler()
         cmdDef.commandCreated.add(onCreated)
         _handlers.append(onCreated)
 
-        # 添加到工具栏 - SOLID > 创建面板
         workspace = _ui.workspaces.itemById('FusionSolidEnvironment')
         panel = workspace.toolbarPanels.itemById('SolidCreatePanel')
         control = panel.controls.addCommand(cmdDef)
@@ -474,18 +495,14 @@ def run(context):
 
 def stop(context):
     try:
-        # 清理命令
         cmdDef = _ui.commandDefinitions.itemById(CMD_ID)
         if cmdDef:
             cmdDef.deleteMe()
-
-        # 清理工具栏按钮
         workspace = _ui.workspaces.itemById('FusionSolidEnvironment')
         panel = workspace.toolbarPanels.itemById('SolidCreatePanel')
         control = panel.controls.itemById(CMD_ID)
         if control:
             control.deleteMe()
-
     except:
         if _ui:
             _ui.messageBox('插件卸载失败:\n{}'.format(traceback.format_exc()))
