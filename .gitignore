@@ -3,3 +3,6 @@ __pycache__/
 *.pyo
 .DS_Store
 Thumbs.db
+CamGenerator.py
+test_cam.py
+.gitignore

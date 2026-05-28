@@ -14,6 +14,7 @@ import os
 _app = None
 _ui = None
 _handlers = []
+_paramInputs = None
 
 CMD_ID = 'CamGeneratorCmd'
 CMD_NAME = '凸轮生成器'
@@ -115,11 +116,18 @@ def generate_multi_segment_profile(baseRadius, segments, motionLaw, numPoints=36
             for i in range(nPts):
                 theta = segAngle * i / nPts
                 delta = func(theta, segAngle, segLift)
-                r = startR + delta if segType == 'rise' else startR - delta
+                if segType == 'rise':
+                    r = startR + delta
+                else:
+                    # 回程：delta 从 h 递减到 0，直接就是当前半径的偏移量
+                    r = rb + delta
                 points.append((angleAccum + theta, r))
             currentR = currentR + segLift if segType == 'rise' else currentR - segLift
 
         angleAccum += segAngle
+
+    # 补闭合点（360° 回到基圆半径）
+    points.append((360.0, rb))
 
     return points
 
@@ -155,6 +163,7 @@ def create_cam_body(rootComp, profile_points, thickness, shaftHoleDia):
     sketch = rootComp.sketches.add(rootComp.xYConstructionPlane)
     sketch.name = 'CamProfile'
 
+    # 创建样条曲线
     splinePoints = adsk.core.ObjectCollection.create()
     for angle_deg, radius in profile_points:
         angle_rad = math.radians(angle_deg)
@@ -162,15 +171,22 @@ def create_cam_body(rootComp, profile_points, thickness, shaftHoleDia):
         y = radius * math.sin(angle_rad)
         splinePoints.add(adsk.core.Point3D.create(x, y, 0))
 
-    # 闭合轮廓
-    first_angle_rad = math.radians(profile_points[0][0])
-    first_r = profile_points[0][1]
-    splinePoints.add(adsk.core.Point3D.create(
-        first_r * math.cos(first_angle_rad),
-        first_r * math.sin(first_angle_rad), 0
-    ))
-
     sketch.sketchCurves.sketchFittedSplines.add(splinePoints)
+
+    # 用直线段闭合轮廓（从末尾点连回起点）
+    lastPt = profile_points[-1]
+    firstPt = profile_points[0]
+    last_angle_rad = math.radians(lastPt[0])
+    first_angle_rad = math.radians(firstPt[0])
+    lastPoint = adsk.core.Point3D.create(
+        lastPt[1] * math.cos(last_angle_rad),
+        lastPt[1] * math.sin(last_angle_rad), 0
+    )
+    firstPoint = adsk.core.Point3D.create(
+        firstPt[1] * math.cos(first_angle_rad),
+        firstPt[1] * math.sin(first_angle_rad), 0
+    )
+    sketch.sketchCurves.sketchLines.addByTwoPoints(lastPoint, firstPoint)
 
     if shaftHoleDia > 0:
         center = adsk.core.Point3D.create(0, 0, 0)
@@ -241,9 +257,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             modeItems.add('导入轮廓点数据', False)
 
             # === 参数化模式组 ===
+            global _paramInputs
             paramGroup = inputs.addGroupCommandInput('paramGroup', '运动规律参数')
             paramGroup.isVisible = True
             paramInputs = paramGroup.children
+            _paramInputs = paramInputs
 
             # 运动规律类型
             lawInput = paramInputs.addDropDownCommandInput(
@@ -263,23 +281,22 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
 
             # 段数
             paramInputs.addIntegerSpinnerCommandInput(
-                'segCount', '运动段数', 1, MAX_SEGMENTS, 1, 2
+                'segCount', '运动段数', 1, MAX_SEGMENTS, 1, 4
             )
 
             # 预创建所有段输入（最多 MAX_SEGMENTS 段）
+            # 默认 4 段: 停60° + 升120°6mm + 停60° + 回120°6mm
+            defaults = [
+                ('停', 60.0, 0.0),
+                ('升', 120.0, 6.0),
+                ('停', 60.0, 0.0),
+                ('回', 120.0, 6.0),
+            ]
             for i in range(MAX_SEGMENTS):
-                # 默认 2 段: 第0段=升(180°,6mm), 第1段=回(180°,6mm)
-                defaultType = '停'
-                defaultAngle = 90.0
-                defaultLift = 0.0
-                if i == 0:
-                    defaultType = '升'
-                    defaultAngle = 180.0
-                    defaultLift = 6.0
-                elif i == 1:
-                    defaultType = '回'
-                    defaultAngle = 180.0
-                    defaultLift = 6.0
+                if i < len(defaults):
+                    defaultType, defaultAngle, defaultLift = defaults[i]
+                else:
+                    defaultType, defaultAngle, defaultLift = '停', 90.0, 0.0
 
                 # 段类型
                 typeInput = paramInputs.addDropDownCommandInput(
@@ -300,12 +317,12 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 # 段升程（仅升/回段显示）
                 liftInput = paramInputs.addFloatSpinnerCommandInput(
                     f'seg{i}Lift', f'段{i+1} 升程', 'mm',
-                    0.1, 100.0, 0.5, defaultLift
+                    0.0, 100.0, 0.5, defaultLift
                 )
                 liftInput.isVisible = (defaultType != '停')
 
                 # 隐藏超出默认段数的控件
-                if i >= 2:
+                if i >= 4:
                     for inp in [typeInput, liftInput]:
                         inp.isVisible = False
                     paramInputs.itemById(f'seg{i}Angle').isVisible = False
@@ -358,13 +375,13 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
 
             elif changedInput.id == 'segCount':
                 count = changedInput.value
-                update_segment_visibility(inputs, count)
-                update_lift_visibility(inputs, count)
+                update_segment_visibility(_paramInputs, count)
+                update_lift_visibility(_paramInputs, count)
 
             elif changedInput.id.startswith('seg') and changedInput.id.endswith('Type'):
                 idx = int(changedInput.id[3:-4])
                 typeName = changedInput.selectedItem.name
-                liftInput = inputs.itemById(f'seg{idx}Lift')
+                liftInput = _paramInputs.itemById(f'seg{idx}Lift')
                 if liftInput:
                     liftInput.isVisible = (typeName != '停')
 
@@ -388,8 +405,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 
             if modeIndex == 0:
                 # === 参数化多段模式 ===
-                paramGroup = inputs.itemById('paramGroup')
-                paramInputs = paramGroup.children
+                paramInputs = _paramInputs
 
                 motionLawItem = paramInputs.itemById('motionLaw').selectedItem
                 motionLawName = motionLawItem.name
