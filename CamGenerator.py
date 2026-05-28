@@ -233,11 +233,11 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             # === 模式选择 ===
             modeInput = inputs.addDropDownCommandInput(
                 'mode', '生成模式',
-                adsk.core.DropDownStyles.LimitedDropDownListStyle
+                adsk.core.DropDownStyles.TextDropDownStyle
             )
             modeItems = modeInput.listItems
-            modeItems.add('参数化运动规律', True, '')
-            modeItems.add('导入轮廓点数据', False, '')
+            modeItems.add('参数化运动规律', True)
+            modeItems.add('导入轮廓点数据', False)
 
             # === 参数化模式组 ===
             paramGroup = inputs.addGroupCommandInput('paramGroup', '运动规律参数')
@@ -247,12 +247,12 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             # 运动规律类型
             lawInput = paramInputs.addDropDownCommandInput(
                 'motionLaw', '运动规律',
-                adsk.core.DropDownStyles.LimitedDropDownListStyle
+                adsk.core.DropDownStyles.TextDropDownStyle
             )
             lawItems = lawInput.listItems
-            lawItems.add('简谐运动', True, 'simple_harmonic')
-            lawItems.add('等速运动', False, 'constant_velocity')
-            lawItems.add('改进梯形', False, 'modified_trapezoid')
+            lawItems.add('简谐运动', True)
+            lawItems.add('等速运动', False)
+            lawItems.add('改进梯形', False)
 
             # 基圆半径
             paramInputs.addFloatSpinnerCommandInput(
