@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Manifest>
+  <AddIn Type="Managed" Name="CamGenerator">
+    <Version>1.0.0</Version>
+  </AddIn>
+  <CompanyDetails>
+    <Name>CamTools</Name>
+    <Product>CamGenerator</Product>
+  </CompanyDetails>
+  <Components>
+    <AddIn Type="Managed">
+      <Name>Cam Generator</Name>
+      <Description>自动创建盘形凸轮的插件，支持参数化运动规律和导入轮廓点数据</Description>
+      <Assembly>CamGenerator.py</Assembly>
+    </AddIn>
+    <Application>
+      <Name>Cam Generator</Name>
+      <ProductType>DesignProductType</ProductType>
+    </Application>
+  </Components>
+</Manifest>
